@@ -1431,20 +1431,36 @@ Converts the SPNEGO authorization header string to an opaque gss token
 
 */
 
-static int _getInputToken(const char *authorization, gss_buffer_t token)
+static int _getInputToken(_In_ struct _Http_SR_SocketData * self,  const char *authorization, gss_buffer_t token)
 {
-    const char *spnegoToken = authorization + AUTHENTICATION_NEGOTIATE_LENGTH + 1;
+    const char *auth = authorization;
 
-    token->value = (unsigned char *)PAL_Malloc(strlen(spnegoToken));
+    switch (self->httpAuthType)
+    {
+    case AUTH_METHOD_NEGOTIATE_WITH_CREDS:
+    case AUTH_METHOD_NEGOTIATE:
+        auth += AUTHENTICATION_NEGOTIATE_LENGTH + 1;
+        break;
+    
+    case AUTH_METHOD_KERBEROS:
+        auth += AUTHENTICATION_KERBEROS_LENGTH + 1;
+        break;
+    
+    default:
+
+        // traceUnknownAuthType
+        return -1;
+    }
+
+    token->value = (unsigned char *)PAL_Malloc(strlen(auth));
     if (!token->value)
     {
         return -1;
     }
-    memset(token->value, 0, strlen(spnegoToken));
+    memset(token->value, 0, strlen(auth));
     token->length = 0;
 
-    int decodedSize = Base64Dec((const void *)spnegoToken, strlen(spnegoToken),
-                                _Base64DecCallback, token);
+    int decodedSize = Base64Dec((const void *)auth, strlen(auth), _Base64DecCallback, token);
 
     if (decodedSize <= 0)
     {
@@ -1453,6 +1469,7 @@ static int _getInputToken(const char *authorization, gss_buffer_t token)
     }
     return 0;
 }
+
 
 /* 
    Convert the gss_buffer_t token to a WWW-Authorization string suitable for the http response header
@@ -1663,6 +1680,7 @@ MI_Boolean IsClientAuthorized(_In_ Http_SR_SocketData * handler)
 
     if (Strncasecmp(headers->authorization, AUTHENTICATION_BASIC, AUTHENTICATION_BASIC_LENGTH) == 0)
     {
+        handler->httpAuthType = AUTH_METHOD_BASIC;
         if (!headers->username || !headers->password || 0 != AuthenticateUser(headers->username, headers->password))
         {
             handler->httpErrorCode = HTTP_ERROR_CODE_UNAUTHORIZED;
@@ -1743,6 +1761,7 @@ MI_Boolean IsClientAuthorized(_In_ Http_SR_SocketData * handler)
 #endif      
 
             protocol_p = AUTHENTICATION_NEGOTIATE;
+            handler->httpAuthType = AUTH_METHOD_NEGOTIATE;
             mechset = (gss_OID_set) & mechset_avail;
 
         }
@@ -1752,8 +1771,8 @@ MI_Boolean IsClientAuthorized(_In_ Http_SR_SocketData * handler)
             // gss_OID mech_type;
 
             protocol_p = AUTHENTICATION_KERBEROS;
+            handler->httpAuthType = AUTH_METHOD_KERBEROS;
             mechset = (gss_OID_set) & mechset_krb5;
-
         }
         else
         {
@@ -1768,7 +1787,7 @@ MI_Boolean IsClientAuthorized(_In_ Http_SR_SocketData * handler)
             return FALSE;
         }
 
-        if (_getInputToken(headers->authorization, &input_token) != 0)
+        if (_getInputToken(handler, headers->authorization, &input_token) != 0)
         {
             trace_HTTP_InvalidAuthToken();
             handler->httpErrorCode = HTTP_ERROR_CODE_INTERNAL_SERVER_ERROR;
@@ -1924,7 +1943,21 @@ MI_Boolean IsClientAuthorized(_In_ Http_SR_SocketData * handler)
                 }
             }
 
+            // If we are doing a key exchange we send our key back after success
 
+            if (output_token.length > 0 )
+            {
+                auth_response = _BuildAuthResponse(protocol_p, handler->httpErrorCode, &output_token, &response_len);
+                if (auth_response == NULL)
+                {
+                    trace_HTTP_CannotBuildAuthResponse();
+                    handler->httpErrorCode = HTTP_ERROR_CODE_INTERNAL_SERVER_ERROR;
+                }
+                (*_g_gssState.Gss_Release_Buffer)(&min_stat, &output_token);
+
+                _SendAuthResponse(handler, auth_response, response_len);
+                PAL_Free(auth_response);
+            }
 
         }
         else if (GSS_ERROR(maj_stat))

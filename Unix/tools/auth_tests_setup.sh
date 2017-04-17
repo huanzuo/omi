@@ -64,6 +64,7 @@ if [ "x${username}" != "x" -a "x${userpasswd}" != "x" ]; then
 
 ## NTLM setup
     
+set -x
     # client side creds
     echo "build cred files"
 
@@ -73,7 +74,7 @@ if [ "x${username}" != "x" -a "x${userpasswd}" != "x" ]; then
     if [ ! -f $client_ntlm_file ]; then
        echo "build client auth file " $client_ntlm_file
 
-       mkdir -p $outputdir/etc
+       mkdir -p $outputdir/tmp
        mkdir -p $client_ntlm_cred_dir
        echo $hostname":"$username":"$userpasswd > $client_ntlm_file
 
@@ -94,7 +95,26 @@ if [ "x${username}" != "x" -a "x${userpasswd}" != "x" ]; then
     else 
        echo "do not build server auth file " $server_ntlm_file
     fi
-    sudo chown root:root $server_ntlm_file
+    sudo chown root $server_ntlm_file
     sudo chmod 600 $server_ntlm_file
+
+set +x
+## Validate Kerberos is setup.
+
+    unset OMI_KRB_TESTS_ENABLED
+    if klist -s ; then
+       # There is a ticket granting ticket in the credential cache. 
+       # We expect that kerberos has been set up but we need to see if the user 
+       # exists. However, there aren't many good ways to do that. So for now if the 
+       echo ${userpasswd} | kinit ${username}
+       if [ $? -ge 0 ] ; then
+           OMI_KRB_TESTS_ENABLED="true"
+           export OMI_KRB_TESTS_ENABLED
+           # Tis is hard-coded here, but won't always be. In the meantime we can 
+           # pretend its being checked in the tests themselves
+           OMI_KRB_TESTS_REALM="SCX.COM"
+           export OMI_KRB_TESTS_REALM
+       fi
+    fi
 fi
 

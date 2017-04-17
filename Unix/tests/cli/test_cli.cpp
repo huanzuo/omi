@@ -23,6 +23,7 @@
 #include <pal/dir.h>
 #include <pal/strings.h>
 #include <pal/file.h>
+#include <pal/host.h>
 #include <omiclient/client.h>
 #include <base/log.h>
 #include <base/pidfile.h>
@@ -58,16 +59,19 @@ namespace
 {
     char httpPort[32];
     char httpsPort[32];
-    const char *omiUser;
-    const char *omiPassword;
-    const char *sudoPath;
+    const char *omiUser    = NULL;
+    const char *omiPassword = NULL;
+    const char *sudoPath    = NULL;
     Process serverProcess;
-    bool startServer;
-    const char *ntlmFile;
-    const char *ntlmDomain;
-    bool travisCI;
-    bool pamConfigured;
-    bool runNtlmTests;
+    bool startServer       = false;
+    const char *ntlmFile   = NULL;
+    const char *ntlmDomain = NULL;
+    const char *krb5Realm  = NULL;
+    const char *hostFqdn   = NULL;
+    bool travisCI          = false;
+    bool pamConfigured     = false;
+    bool runNtlmTests      = false;
+    bool runKrbTests       = false;
 }
 
 // Parse the command line into tokens.
@@ -259,7 +263,20 @@ static void VerifyEnvironmentVariables()
     sudoPath = std::getenv("SUDO_PATH");
     ntlmFile = std::getenv("NTLM_USER_FILE");
     ntlmDomain = std::getenv("NTLM_DOMAIN");
+    krb5Realm = std::getenv("OMI_KRB_TESTS_REALM");
+    if (!hostFqdn)
+    {
+        hostFqdn = getFullyQualifiedDomainName();
+    }
+
     const char *ntlmSupportedPlatform = std::getenv("NTLM_SUPPORTED_PLATFORM");
+    const char *krbTestsEnabled = std::getenv("OMI_KRB_TESTS_ENABLED");
+
+    if (!hostFqdn) 
+    {
+        startServer = false;
+        NitsCompare(startServer, true, MI_T("Required configuration for hosts fully qualified domain name not found."));
+    }
 
     if (!omiUser || !omiPassword)
     {
@@ -305,11 +322,19 @@ static void VerifyEnvironmentVariables()
         sudoPath = "/usr/bin/sudo";
     }
 
+    if (!krbTestsEnabled || (strncasecmp(krbTestsEnabled, "true", 4) != 0))
+    {
+        runKrbTests = false;
+    }
+    else
+    {
+        runKrbTests = true;
+    }
+
     if (!pamConfigured)
     {
         ConfigurePAM();
     }
-    
 }
 
 static int StartServerSudo()
@@ -1774,7 +1799,8 @@ NitsTestWithSetup(TestOMICLI25_GetInstanceWsmanNegotiateAuthWithEncrypt, TestCli
         MI_Char buffer[1024];
 
         Stprintf(buffer, MI_COUNT(buffer),
-                 MI_T("omicli gi --encryption http --hostname localhost --auth NegoWithCreds -u %T\\%T -p %T --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 MI_T("omicli gi --encryption http --hostname %T --auth NegoWithCreds -u %T\\%T -p %T --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
                  ntlmDomain,
                  omiUser,
                  omiPassword,
@@ -2146,6 +2172,291 @@ NitsTestWithSetup(TestOMICLI32_UserOption, TestCliSetup)
              httpPort);
 
     NitsCompare(Exec(buffer, out, err), 1, MI_T("Omicli error"));
+}
+NitsEndTest
+
+
+NitsTestWithSetup(TestOMICLI36_GetInstanceWsmanKerberosAuth, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --hostname %T --auth Kerberos -u %T@%T -p %T --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 omiUser,
+                 krb5Realm,
+                 omiPassword,
+                 httpPort);
+
+        NitsCompare(Exec(buffer, out, err), 0, MI_T("Omicli error"));
+
+        string expect;
+        NitsCompare(InhaleTestFile("TestOMICLI25.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompare(err == "", true, MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
+}
+NitsEndTest
+
+NitsTestWithSetup(TestOMICLI37_GetInstanceWsmanFailKerberosAuth, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --hostname %T --auth Kerberos -u %T\\%T -p BadPassword --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 krb5Realm,
+                 omiUser,
+                 httpPort);
+
+        string expect = string("");
+        string expected_err = string("omicli: result: MI_RESULT_ACCESS_DENIED\n");
+        NitsCompare(InhaleTestFile("TestOMICLI35.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompare(Exec(buffer, out, err), 2, MI_T("Omicli error"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompareString(err.c_str(), expected_err.c_str(), MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
+}
+NitsEndTest
+
+NitsTestWithSetup(TestOMICLI38_GetInstanceWsmanKerberosAuthSSL, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --encryption https --hostname %T --auth Kerberos -u %T\\%T -p %T --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 krb5Realm,
+                 omiUser,
+                 omiPassword,
+                 httpsPort);
+
+        NitsCompare(Exec(buffer, out, err), 0, MI_T("Omicli error"));
+
+        string expect;
+        NitsCompare(InhaleTestFile("TestOMICLI25.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompare(err == "", true, MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
+}
+NitsEndTest
+
+NitsTestWithSetup(TestOMICLI39_GetInstanceWsmanFailKerberosAuthSSL, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --encryption https --hostname %T --auth Kerberos -u %T\\%T -p BadPassword --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 krb5Realm,
+                 omiUser,
+                 httpsPort);
+
+        string expect = string("");
+        string expected_err = string("omicli: result: MI_RESULT_ACCESS_DENIED\n");
+        NitsCompare(InhaleTestFile("TestOMICLI35.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompare(Exec(buffer, out, err), 2, MI_T("Omicli error"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompareString(err.c_str(), expected_err.c_str(), MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
+}
+NitsEndTest
+
+NitsTestWithSetup(TestOMICLI40_GetInstanceWsmanKerberosAuthWithEncrypt, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --encryption http --hostname %T --auth Kerberos -u %T\\%T -p %T --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 krb5Realm,
+                 omiUser,
+                 omiPassword,
+                 httpPort);
+
+        NitsCompare(Exec(buffer, out, err), 0, MI_T("Omicli error"));
+
+        string expect;
+        NitsCompare(InhaleTestFile("TestOMICLI25.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompare(err == "", true, MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
+}
+NitsEndTest
+
+NitsTestWithSetup(TestOMICLI41_GetInstanceWsmanFailKerberosAuthWithEncrypt, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --encryption http --hostname %T --auth Kerberos -u %T\\%T -p BadPassword --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 krb5Realm,
+                 omiUser,
+                 httpPort);
+
+        string expect = string("");
+        string expected_err = string("omicli: result: MI_RESULT_ACCESS_DENIED\n");
+        NitsCompare(InhaleTestFile("TestOMICLI35.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompare(Exec(buffer, out, err), 2, MI_T("Omicli error"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompareString(err.c_str(), expected_err.c_str(), MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
+}
+NitsEndTest
+
+NitsTestWithSetup(TestOMICLI44_GetInstanceWsmanKerberosAuthNoEncrypt, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --encryption none --hostname %T --auth Kerberos -u %T\\%T -p %T --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 krb5Realm,
+                 omiUser,
+                 omiPassword,
+                 httpPort);
+
+        NitsCompare(Exec(buffer, out, err), 0, MI_T("Omicli error"));
+
+        string expect;
+        NitsCompare(InhaleTestFile("TestOMICLI25.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompare(err == "", true, MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
+}
+NitsEndTest
+
+NitsTestWithSetup(TestOMICLI45_GetInstanceWsmanFailKerberosAuthNoEncrypt, TestCliSetupSudo)
+{
+    if (runKrbTests && startServer && !travisCI)
+    {
+        NitsDisableFaultSim;
+
+        string out;
+        string err;
+        MI_Char buffer[1024];
+
+        Stprintf(buffer, MI_COUNT(buffer),
+                 MI_T("omicli gi --encryption none --hostname %T --auth Kerberos -u %T\\%T -p BadPassword --port %T oop/requestor/test/cpp { MSFT_President Key 1 }"),
+                 hostFqdn,
+                 krb5Realm,
+                 omiUser,
+                 httpPort);
+
+        string expect = string("");
+        string expected_err = string("omicli: result: MI_RESULT_ACCESS_DENIED\n");
+        NitsCompare(InhaleTestFile("TestOMICLI35.txt", expect), true, MI_T("Inhale failure"));
+        NitsCompare(Exec(buffer, out, err), 2, MI_T("Omicli error"));
+        NitsCompareString(out.c_str(), expect.c_str(), MI_T("Output mismatch"));
+        NitsCompareString(err.c_str(), expected_err.c_str(), MI_T("Error output mismatch"));
+    }
+    else
+    {
+        // every test must contain an assertion
+        if (!runKrbTests || travisCI)
+            NitsCompare(0, 0, MI_T("test skipped"));   
+        else
+            NitsCompare(1, 0, MI_T("test did not run"));   
+    }
 }
 NitsEndTest
 
